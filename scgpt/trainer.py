@@ -15,7 +15,7 @@ from scgpt.loss import (
     masked_relative_error,
     criterion_neg_log_bernoulli,
 )
-from scgpt.utils import eval_scib_metrics
+from scgpt.utils import eval_scib_metrics, AutocastConfig, get_device_backend
 import warnings
 from scipy.sparse import issparse
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
@@ -204,6 +204,10 @@ def train(
     log_interval = config.log_interval
     start_time = time.time()
 
+    # Create autocast config for device-agnostic AMP
+    autocast_config = AutocastConfig(device, enabled=config.amp)
+    device_backend = get_device_backend(device)
+
     num_batches = len(loader)
     for batch, batch_data in enumerate(loader):
         input_gene_ids = batch_data["gene_ids"].to(device)
@@ -217,7 +221,8 @@ def train(
 
         src_key_padding_mask = input_gene_ids.eq(vocab[config.pad_token])
 
-        with torch.cuda.amp.autocast(enabled=config.amp):
+        # Use device-agnostic autocast context
+        with autocast_config.autocast_context():
             output_dict = model(
                 input_gene_ids,
                 input_values,
@@ -397,6 +402,10 @@ def evaluate(
     # total_error = 0.0
     total_dab = 0.0
     total_num = 0
+    
+    # Create autocast config for device-agnostic AMP
+    autocast_config = AutocastConfig(device, enabled=config.amp)
+    
     with torch.no_grad():
         for batch_data in loader:
             input_gene_ids = batch_data["gene_ids"].to(device)
@@ -410,7 +419,8 @@ def evaluate(
 
             src_key_padding_mask = input_gene_ids.eq(vocab[config.pad_token])
 
-            with torch.cuda.amp.autocast(enabled=config.amp):
+            # Use device-agnostic autocast context
+            with autocast_config.autocast_context():
                 output_dict = model(
                     input_gene_ids,
                     input_values,
@@ -473,6 +483,10 @@ def predict(
     model.eval()
 
     predictions = []
+    
+    # Create autocast config for device-agnostic AMP
+    autocast_config = AutocastConfig(device, enabled=config.amp)
+    
     with torch.no_grad():
         for batch_data in loader:
             input_gene_ids = batch_data["gene_ids"].to(device)
@@ -483,7 +497,8 @@ def predict(
 
             src_key_padding_mask = input_gene_ids.eq(vocab[config.pad_token])
 
-            with torch.cuda.amp.autocast(enabled=config.amp):
+            # Use device-agnostic autocast context
+            with autocast_config.autocast_context():
                 output_dict = model(
                     input_gene_ids,
                     input_values,
@@ -613,6 +628,12 @@ def eval_testdata(
     batch_ids = adata_t.obs["batch_id"].tolist()
     batch_ids = np.array(batch_ids)
 
+    # Get device from model parameters
+    device = next(model.parameters()).device
+    
+    # Create autocast config for device-agnostic AMP
+    autocast_config = AutocastConfig(device, enabled=config.amp)
+
     # Evaluate cls cell embeddings
     if "cls" in include_types:
         logger.info("Evaluating cls cell embeddings")
@@ -628,7 +649,7 @@ def eval_testdata(
         )
         all_gene_ids, all_values = tokenized_all["genes"], tokenized_all["values"]
         src_key_padding_mask = all_gene_ids.eq(vocab[config.pad_token])
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=config.amp):
+        with torch.no_grad(), autocast_config.autocast_context():
             cell_embeddings = model.encode_batch(
                 all_gene_ids,
                 all_values.float(),

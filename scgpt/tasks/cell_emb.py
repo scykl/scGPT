@@ -14,7 +14,7 @@ from .. import logger
 from ..data_collator import DataCollator
 from ..model import TransformerModel
 from ..tokenizer import GeneVocab
-from ..utils import load_pretrained
+from ..utils import load_pretrained, AutocastConfig, get_device
 
 PathLike = Union[str, os.PathLike]
 
@@ -117,7 +117,11 @@ def get_batch_cell_embeddings(
         cell_embeddings = np.zeros(
             (len(dataset), model_configs["embsize"]), dtype=np.float32
         )
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
+        
+        # Create autocast config for device-agnostic AMP
+        autocast_config = AutocastConfig(device, enabled=True)
+        
+        with torch.no_grad(), autocast_config.autocast_context():
             count = 0
             for data_dict in tqdm(data_loader, desc="Embedding cells"):
                 input_gene_ids = data_dict["gene"].to(device)
@@ -152,7 +156,7 @@ def embed_data(
     max_length=1200,
     batch_size=64,
     obs_to_save: Optional[list] = None,
-    device: Union[str, torch.device] = "cuda",
+    device: Union[str, torch.device] = "auto",
     use_fast_transformer: bool = True,
     return_new_adata: bool = False,
 ) -> AnnData:
@@ -168,7 +172,8 @@ def embed_data(
         batch_size (int): The batch size for inference. Defaults to 64.
         obs_to_save (Optional[list]): The list of obs columns to save in the output adata.
             Useful for retaining meta data to output. Defaults to None.
-        device (Union[str, torch.device]): The device to use. Defaults to "cuda".
+        device (Union[str, torch.device]): The device to use. Options: "auto" (default),
+            "cuda", "cpu", "xpu". Defaults to "auto".
         use_fast_transformer (bool): Whether to use flash-attn. Defaults to True.
         return_new_adata (bool): Whether to return a new AnnData object. If False, will
             add the cell embeddings to a new :attr:`adata.obsm` with key "X_scGPT".
@@ -191,10 +196,9 @@ def embed_data(
     else:
         assert gene_col in adata.var
 
-    if device == "cuda":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if not torch.cuda.is_available():
-            print("WARNING: CUDA is not available. Using CPU instead.")
+    # Use device_utils for robust device management
+    if isinstance(device, str):
+        device = get_device(device)
 
     # LOAD MODEL
     model_dir = Path(model_dir)

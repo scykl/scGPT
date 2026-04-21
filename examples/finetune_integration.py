@@ -40,7 +40,7 @@ from scgpt.loss import (
 )
 from scgpt.preprocess import Preprocessor
 from scgpt import SubsetsBatchSampler
-from scgpt.utils import set_seed, category_str2int, eval_scib_metrics
+from scgpt.utils import set_seed, category_str2int, eval_scib_metrics, get_device, GradScalerAdapter, AutocastConfig
 
 sc.set_figure_params(figsize=(4, 4))
 os.environ["KMP_WARNINGS"] = "off"
@@ -379,7 +379,9 @@ def prepare_dataloader(
 # # Create and finetune scGPT
 
 # %%
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Use get_device for robust device management (supports auto-detection of XPU, CUDA, or CPU)
+device = get_device("auto")
+print(f"Using device: {device}")
 
 ntokens = len(vocab)  # size of vocabulary
 model = TransformerModel(
@@ -432,7 +434,8 @@ optimizer = torch.optim.Adam(
 )
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=config.schedule_ratio)
 
-scaler = torch.cuda.amp.GradScaler(enabled=config.amp)
+# Use GradScalerAdapter for cross-device support (CUDA, XPU, CPU)
+scaler = GradScalerAdapter(device, enabled=config.amp)
 
 
 def train(model: nn.Module, loader: DataLoader) -> None:
@@ -445,6 +448,9 @@ def train(model: nn.Module, loader: DataLoader) -> None:
     log_interval = config.log_interval
     start_time = time.time()
 
+    # Create autocast config for device-agnostic AMP
+    autocast_config = AutocastConfig(device, enabled=config.amp)
+
     num_batches = len(loader)
     for batch, batch_data in enumerate(loader):
         input_gene_ids = batch_data["gene_ids"].to(device)
@@ -453,7 +459,8 @@ def train(model: nn.Module, loader: DataLoader) -> None:
         batch_labels = batch_data["batch_labels"].to(device)
 
         src_key_padding_mask = input_gene_ids.eq(vocab[pad_token])
-        with torch.cuda.amp.autocast(enabled=config.amp):
+        # Use device-agnostic autocast context
+        with autocast_config.autocast_context():
             output_dict = model(
                 input_gene_ids,
                 input_values,
@@ -564,6 +571,10 @@ def evaluate(model: nn.Module, loader: DataLoader) -> float:
     total_error = 0.0
     total_dab = 0.0
     total_num = 0
+    
+    # Create autocast config for device-agnostic AMP
+    autocast_config = AutocastConfig(device, enabled=config.amp)
+    
     with torch.no_grad():
         for batch_data in loader:
             input_gene_ids = batch_data["gene_ids"].to(device)
@@ -572,7 +583,8 @@ def evaluate(model: nn.Module, loader: DataLoader) -> float:
             batch_labels = batch_data["batch_labels"].to(device)
 
             src_key_padding_mask = input_gene_ids.eq(vocab[pad_token])
-            with torch.cuda.amp.autocast(enabled=config.amp):
+            # Use device-agnostic autocast context
+            with autocast_config.autocast_context():
                 output_dict = model(
                     input_gene_ids,
                     input_values,
@@ -644,7 +656,11 @@ def eval_testdata(
         )
         all_gene_ids, all_values = tokenized_all["genes"], tokenized_all["values"]
         src_key_padding_mask = all_gene_ids.eq(vocab[pad_token])
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=config.amp):
+        
+        # Create autocast config for device-agnostic AMP
+        autocast_config = AutocastConfig(device, enabled=config.amp)
+        
+        with torch.no_grad(), autocast_config.autocast_context():
             cell_embeddings = model.encode_batch(
                 all_gene_ids,
                 all_values.float(),
