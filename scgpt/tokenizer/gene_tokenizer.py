@@ -8,13 +8,46 @@ from typing_extensions import Self
 import numpy as np
 import pandas as pd
 import torch
-import torchtext.vocab as torch_vocab
-from torchtext.vocab import Vocab
 
 # from transformers.tokenization_utils import PreTrainedTokenizer
 # from transformers import AutoTokenizer, BertTokenizer
 
 from .. import logger
+
+
+# Try to import torchtext, if fails provide fallback implementation
+try:
+    import torchtext.vocab as torch_vocab
+    from torchtext.vocab import Vocab
+    _TORCHTEXT_AVAILABLE = True
+except (ImportError, OSError) as e:
+    logger.warning(f"torchtext not available: {e}. Using fallback Vocab implementation.")
+    _TORCHTEXT_AVAILABLE = False
+    
+    # Fallback Vocab implementation
+    class Vocab:
+        def __init__(self, vocab):
+            self.vocab = vocab
+            self.itos = list(vocab.keys())
+            self.stoi = vocab
+            self._default_index = 0
+        
+        def __contains__(self, token):
+            return token in self.stoi
+        
+        def __getitem__(self, token):
+            return self.stoi.get(token, self._default_index)
+        
+        def __len__(self):
+            return len(self.stoi)
+        
+        def set_default_index(self, index):
+            self._default_index = index
+        
+        def get_stoi(self):
+            return self.stoi
+    
+    torch_vocab = None
 
 
 class GeneVocab(Vocab):
@@ -130,7 +163,7 @@ class GeneVocab(Vocab):
             special_first (bool): Whether to add special tokens to the beginning
 
         Returns:
-            torchtext.vocab.Vocab: A `Vocab` object
+            Vocab: A `Vocab` object
         """
 
         counter = Counter()
@@ -151,7 +184,14 @@ class GeneVocab(Vocab):
                 ordered_dict.update({symbol: min_freq})
                 ordered_dict.move_to_end(symbol, last=not special_first)
 
-        word_vocab = torch_vocab.vocab(ordered_dict, min_freq=min_freq)
+        # Use torchtext vocab if available, otherwise create dict-based vocab
+        if _TORCHTEXT_AVAILABLE and torch_vocab is not None:
+            word_vocab = torch_vocab.vocab(ordered_dict, min_freq=min_freq)
+        else:
+            # Fallback: create vocab dict directly
+            vocab_dict = {token: idx for idx, token in enumerate(ordered_dict.keys())}
+            word_vocab = Vocab(vocab_dict)
+        
         return word_vocab
 
     @property

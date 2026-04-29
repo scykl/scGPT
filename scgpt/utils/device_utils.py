@@ -84,15 +84,15 @@ def get_device(device_str: Optional[str] = None) -> torch.device:
 def is_xpu_available() -> bool:
     """
     Check if Intel XPU backend is available.
-    
+
     Returns:
-        bool: True if IPEX is installed and XPU is available
+        bool: True if XPU is available (via IPEX or PyTorch built-in XPU support)
     """
+    if hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available"):
+        return torch.xpu.is_available()
+
     try:
         import intel_extension_for_pytorch as ipex
-        # Check if XPU devices are available
-        if hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available"):
-            return torch.xpu.is_available()
         return hasattr(ipex, "__version__")
     except ImportError:
         return False
@@ -138,7 +138,7 @@ class AutocastConfig:
     def autocast_context(self):
         """
         Context manager for autocast based on device type.
-        
+
         Usage:
             config = AutocastConfig(device, enabled=True)
             with config.autocast_context():
@@ -147,24 +147,25 @@ class AutocastConfig:
         if not self.enabled:
             yield
             return
-        
+
         if self.device_backend == "cuda":
             with torch.cuda.amp.autocast():
                 yield
         elif self.device_backend == "xpu":
-            try:
-                import intel_extension_for_pytorch as ipex
-                # IPEX provides automatic mixed precision via optimize
-                # For autocast context, we use torch.autocast with dtype
-                with torch.autocast(device_type="xpu", dtype=torch.float16):
+            if hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available") and torch.xpu.is_available():
+                with torch.amp.autocast("xpu", enabled=True):
                     yield
-            except ImportError:
-                warnings.warn(
-                    "IPEX not available for XPU autocast, running without mixed precision"
-                )
-                yield
+            else:
+                try:
+                    import intel_extension_for_pytorch as ipex
+                    with torch.autocast(device_type="xpu", dtype=torch.float16):
+                        yield
+                except ImportError:
+                    warnings.warn(
+                        "XPU autocast not available, running without mixed precision"
+                    )
+                    yield
         else:
-            # CPU doesn't support autocast well, skip it
             yield
 
 
@@ -193,25 +194,25 @@ class GradScalerAdapter:
         if not self.enabled:
             self.scaler = None
             return
-        
+
         if self.device_backend == "cuda":
             self.scaler = torch.cuda.amp.GradScaler(enabled=True)
         elif self.device_backend == "xpu":
             try:
                 import intel_extension_for_pytorch as ipex
-                # IPEX provides its own GradScaler
                 if hasattr(ipex, "GradScaler"):
                     self.scaler = ipex.GradScaler(enabled=True)
                 else:
-                    # Fallback to torch GradScaler with some manual handling
-                    self.scaler = torch.cuda.amp.GradScaler(enabled=True)
+                    self.scaler = torch.amp.GradScaler("xpu", enabled=True)
             except ImportError:
-                warnings.warn(
-                    "IPEX not available, using torch GradScaler for XPU"
-                )
-                self.scaler = torch.cuda.amp.GradScaler(enabled=True)
+                if hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available") and torch.xpu.is_available():
+                    self.scaler = torch.amp.GradScaler("xpu", enabled=True)
+                else:
+                    warnings.warn(
+                        "XPU GradScaler not available, gradient scaling disabled"
+                    )
+                    self.scaler = None
         else:
-            # CPU doesn't need gradient scaling
             self.scaler = None
     
     def scale(self, loss):
@@ -224,11 +225,15 @@ class GradScalerAdapter:
         """Unscale gradients."""
         if self.scaler is None:
             return
+        if self.device_backend == "xpu":
+            return
         self.scaler.unscale_(optimizer)
     
     def step(self, optimizer):
         """Optimizer step with scaled loss."""
         if self.scaler is None:
+            optimizer.step()
+        elif self.device_backend == "xpu":
             optimizer.step()
         else:
             self.scaler.step(optimizer)
@@ -236,6 +241,8 @@ class GradScalerAdapter:
     def update(self):
         """Update the scale for next iteration."""
         if self.scaler is None:
+            return
+        if self.device_backend == "xpu":
             return
         self.scaler.update()
     
